@@ -23,7 +23,8 @@ export interface Truck {
     driverName: string;
     companyName: string;
     driverPhone?: string;
-    department: string; // Deprecated but kept for compatibility
+    salesPerson?: string;
+    department?: string; // Deprecated but kept for compatibility
     categories: string[];
     currentCategoryIndex: number;
     orderNumber?: string;

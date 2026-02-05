@@ -10,7 +10,7 @@ interface User {
     username: string;
     role: UserRole;
     email: string;
-
+    permissions?: string[];
 }
 
 interface AuthState {
@@ -21,6 +21,7 @@ interface AuthState {
     logout: () => void;
     // Helper Methods
     hasRole: (roles: UserRole[]) => boolean;
+    hasPermission: (permission: string) => boolean;
     isAdmin: () => boolean;
     isSupervisor: () => boolean;
     isManager: () => boolean;
@@ -44,6 +45,12 @@ export const useAuthStore = create<AuthState>()(
             hasRole: (roles: UserRole[]) => {
                 const user = get().user;
                 return user ? roles.includes(user.role) : false;
+            },
+            hasPermission: (permission: string) => {
+                const user = get().user;
+                if (!user) return false;
+                if (user.role === 'ADMINISTRATOR') return true; // Implicit Admin Access
+                return user.permissions?.includes(permission) || false;
             },
             isAdmin: () => get().user?.role === 'ADMINISTRATOR',
             isSupervisor: () => get().user?.role === 'SUPERVISOR',

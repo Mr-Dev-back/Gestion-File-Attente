@@ -9,6 +9,10 @@ import { toast } from '../components/molecules/ui/toast';
 import { useTruckStore, type TruckPriority } from '../stores/useTruckStore';
 import { printTicket } from '../utils/printTicket';
 import { useAuthStore } from '../stores/useAuthStore';
+import { api } from '../services/api';
+import { useSocket } from '../hooks/useSocket';
+import { useQueueStatus } from '../hooks/useQueueStatus';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '../components/molecules/ui/tooltip';
 
 const priorityMap = {
     CRITIQUE: { label: 'Critique', variant: 'destructive' as const, glow: 'shadow-[0_0_15px_rgba(239,68,68,0.5)]' },
@@ -19,11 +23,13 @@ const priorityMap = {
 const zones = ['ZONE INFRA', 'ZONE ELEC', 'ZONE BAT', 'ZONE ATTENTE'];
 
 export default function Queue() {
-    const { trucks, fetchTrucks, updateStatus, transferTicket } = useTruckStore();
+    const { updateStatus, transferTicket } = useTruckStore();
     const { user } = useAuthStore();
+    const { queueStatus, isLoading: isQueueLoading, refetch } = useQueueStatus(user?.siteId);
+    const { isConnected } = useSocket(user?.siteId);
+
     const [searchQuery, setSearchQuery] = useState('');
     const [filterPriority, setFilterPriority] = useState<string | null>(null);
-    const [filterDepartment, setFilterDepartment] = useState<'INFRA' | 'ELECT' | 'BATIMENT' | null>(null);
     const [transferModalOpen, setTransferModalOpen] = useState(false);
     const [detailsModalOpen, setDetailsModalOpen] = useState(false);
     const [selectedTruckId, setSelectedTruckId] = useState<string | null>(null);
@@ -32,23 +38,12 @@ export default function Queue() {
     const [priorityReason, setPriorityReason] = useState('');
     const [targetPriority, setTargetPriority] = useState<TruckPriority>('NORMAL');
 
-    useEffect(() => {
-        fetchTrucks();
-        const interval = setInterval(() => fetchTrucks(), 30000);
-        if (user?.department && user.department !== 'ALL') {
-            setFilterDepartment(user.department as any);
-        }
-        return () => clearInterval(interval);
-    }, []);
+    const totalInFile = Object.values(queueStatus).reduce((sum, cat) => sum + cat.count, 0);
+    const waitingCount = Object.values(queueStatus).reduce((sum, cat) => sum + cat.tickets.filter(t => t.status === 'EN_ATTENTE' || t.status === 'PESÉ_ENTRÉE').length, 0);
+    const calledCount = Object.values(queueStatus).reduce((sum, cat) => sum + cat.tickets.filter(t => t.status === 'APPELÉ').length, 0);
+    const criticalCount = Object.values(queueStatus).reduce((sum, cat) => sum + cat.tickets.filter(t => t.priority === 'CRITIQUE').length, 0);
 
-    const queueTrucks = trucks.filter(t =>
-        ['PESÉ_ENTRÉE', 'EN_VENTE', 'APPELÉ', 'EN_CHARGEMENT', 'CHARGEMENT_TERMINÉ', 'BL_GÉNÉRÉ', 'PESÉ_SORTIE'].includes(t.status)
-    );
-
-    const handleCall = async (id: string) => {
-        const truck = trucks.find(t => t.id === id);
-        if (!truck) return;
-        const currentCategory = truck.categories?.[truck.currentCategoryIndex || 0] || 'INFRA';
+    const handleCall = async (id: string, currentCategory: string) => {
         let zone = 'ZONE ATTENTE';
         switch (currentCategory) {
             case 'BATIMENT': zone = 'ZONE BAT'; break;
@@ -107,43 +102,35 @@ export default function Queue() {
         }
 
         try {
-            const truck = trucks.find(t => t.id === selectedTruckId);
-            await updateStatus(selectedTruckId, truck?.status || 'EN_ATTENTE', {
+            await updateStatus(selectedTruckId, 'EN_ATTENTE', { // We use current status if available from somewhere, but usually status doesn't change here
                 priority: targetPriority,
                 priorityReason: priorityReason
             });
             toast(`Priorité mise à jour : ${targetPriority}`, 'success');
             setPriorityModalOpen(false);
             setSelectedTruckId(null);
+            setPriorityReason('');
         } catch (error) {
             toast('Erreur mise à jour priorité', 'error');
         }
     };
 
-    const filteredQueue = queueTrucks
-        .filter(t =>
-            t.licensePlate.toLowerCase().includes(searchQuery.toLowerCase()) ||
-            t.companyName?.toLowerCase().includes(searchQuery.toLowerCase())
-        )
-        .filter(t => !filterPriority || t.priority === filterPriority)
-        .filter(t => {
-            if (!filterDepartment) return true;
-            const activeCat = t.categories?.[t.currentCategoryIndex || 0] || 'TP';
-            return activeCat === filterDepartment;
-        })
-        .sort((a, b) => {
-            const priorityOrder = { CRITIQUE: 0, URGENT: 1, NORMAL: 2 };
-            if (priorityOrder[a.priority] !== priorityOrder[b.priority]) {
-                return priorityOrder[a.priority] - priorityOrder[b.priority];
-            }
-            return new Date(a.arrivedAt).getTime() - new Date(b.arrivedAt).getTime();
-        });
+    const handleReprint = async (truck: any) => {
+        try {
+            await api.post(`/tickets/${truck.id}/log-print`);
+            printTicket(truck);
+            toast('Réimpression journalisée', 'success');
+        } catch (error) {
+            console.error('Failed to log reprint:', error);
+            printTicket(truck);
+        }
+    };
 
     const stats = {
-        total: queueTrucks.length,
-        waiting: trucks.filter(t => t.status === 'EN_VENTE' || t.status === 'PESÉ_ENTRÉE').length,
-        called: trucks.filter(t => t.status === 'APPELÉ').length,
-        critical: queueTrucks.filter(t => t.priority === 'CRITIQUE').length,
+        total: totalInFile,
+        waiting: waitingCount,
+        called: calledCount,
+        critical: criticalCount,
     };
 
     return (
@@ -154,41 +141,64 @@ export default function Queue() {
 
             {/* Header Section */}
             <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4 pb-6 border-b border-white/20 bg-white/40 backdrop-blur-md p-8 rounded-[2.5rem] shadow-sm animate-fade-in hover:shadow-md transition-all duration-500">
-                <div>
-                    <h2 className="text-5xl font-black tracking-tighter text-text-main flex items-center gap-4">
-                        <div className="p-3 bg-gradient-to-br from-primary to-primary/80 rounded-2xl text-white shadow-lg shadow-primary/30 transform rotate-3">
-                            <ListOrdered className="h-10 w-10" />
-                        </div>
-                        File d'Attente
-                    </h2>
-                    <p className="text-text-muted font-bold tracking-wide mt-2 ml-20 text-lg uppercase opacity-70">
-                        Gestion des flux & Appels Camions
-                    </p>
+                <div className="flex items-center gap-4">
+                    <div className="p-3 bg-gradient-to-br from-primary to-primary/80 rounded-2xl text-white shadow-lg shadow-primary/30 transform rotate-3">
+                        <ListOrdered className="h-10 w-10" />
+                    </div>
+                    <div>
+                        <h2 className="text-5xl font-black tracking-tighter text-text-main flex items-center gap-3">
+                            File d'Attente
+                            <TooltipProvider>
+                                <Tooltip>
+                                    <TooltipTrigger asChild>
+                                        <div className={cn(
+                                            "w-3 h-3 rounded-full mt-4",
+                                            isConnected ? "bg-success animate-pulse" : "bg-danger"
+                                        )} />
+                                    </TooltipTrigger>
+                                    <TooltipContent>
+                                        <p>{isConnected ? 'Synchronisation temps réel active' : 'Connexion perdue - Reconnexion en cours...'}</p>
+                                    </TooltipContent>
+                                </Tooltip>
+                            </TooltipProvider>
+                        </h2>
+                        <p className="text-text-muted font-bold tracking-wide mt-1 text-lg uppercase opacity-70">
+                            Orchestration des flux camions
+                        </p>
+                    </div>
                 </div>
-                <Button
-                    variant="outline"
-                    size="lg"
-                    onClick={() => fetchTrucks()}
-                    className="bg-white/50 backdrop-blur-sm border-white/50 hover:bg-white/80 shadow-sm rounded-xl"
-                >
-                    <RefreshCcw className="mr-2 h-5 w-5" />
-                    Rafraîchir
-                </Button>
+                <div className="flex items-center gap-3">
+                    <div className="relative group">
+                        <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-text-muted group-focus-within:text-primary transition-colors" />
+                        <input
+                            placeholder="Rechercher..."
+                            className="w-full h-12 pl-11 pr-4 rounded-xl border border-white/40 bg-white/50 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 transition-all placeholder:text-text-muted/50 text-text-main shadow-sm"
+                            value={searchQuery}
+                            onChange={e => setSearchQuery(e.target.value)}
+                        />
+                    </div>
+                    <Button
+                        variant="outline"
+                        size="lg"
+                        onClick={() => refetch()}
+                        className="bg-white/50 backdrop-blur-sm border-white/50 hover:bg-white/80 shadow-sm rounded-xl"
+                    >
+                        <RefreshCcw className={cn("mr-2 h-5 w-5", isQueueLoading && "animate-spin")} />
+                        Rafraîchir
+                    </Button>
+                </div>
             </div>
 
             {/* KPI Cards */}
             <div className="grid gap-6 md:grid-cols-4">
                 {[
-                    { label: 'Total en File', value: stats.total, icon: TruckIcon, color: 'text-primary', bg: 'bg-primary/10', border: 'border-primary/20' },
-                    { label: 'En Attente', value: stats.waiting, icon: Clock, color: 'text-warning', bg: 'bg-warning/10', border: 'border-warning/20' },
-                    { label: 'Appelés', value: stats.called, icon: Megaphone, color: 'text-success', bg: 'bg-success/10', border: 'border-success/20' },
-                    { label: 'Critiques', value: stats.critical, icon: ArrowUp, color: 'text-danger', bg: 'bg-danger/10', border: 'border-danger/20' }
+                    { label: 'Total en File', value: stats.total, icon: TruckIcon, color: 'text-primary', bg: 'bg-primary/10' },
+                    { label: 'En Attente', value: stats.waiting, icon: Clock, color: 'text-warning', bg: 'bg-warning/10' },
+                    { label: 'Appelés', value: stats.called, icon: Megaphone, color: 'text-success', bg: 'bg-success/10' },
+                    { label: 'Critiques', value: stats.critical, icon: ArrowUp, color: 'text-danger', bg: 'bg-danger/10' }
                 ].map((stat, idx) => (
-                    <div key={idx} className={cn(
-                        "relative overflow-hidden rounded-[2rem] p-6 backdrop-blur-md border shadow-lg transition-all duration-300 hover:scale-[1.03] group",
-                        "bg-white/60 border-white/40"
-                    )}>
-                        <div className={cn("absolute top-0 right-0 w-32 h-32 rounded-full blur-2xl -mr-10 -mt-10 opacity-50 transition-opacity group-hover:opacity-80", stat.bg)} />
+                    <div key={idx} className="relative overflow-hidden rounded-[2rem] p-6 backdrop-blur-md border border-white/40 bg-white/60 shadow-lg transition-all duration-300 hover:scale-[1.03] group">
+                        <div className={cn("absolute top-0 right-0 w-32 h-32 rounded-full blur-2xl -mr-10 -mt-10 opacity-50", stat.bg)} />
                         <div className="flex items-center justify-between relative z-10">
                             <div>
                                 <p className="text-sm font-bold text-text-muted uppercase tracking-wider mb-1">{stat.label}</p>
@@ -202,198 +212,172 @@ export default function Queue() {
                 ))}
             </div>
 
-            {/* Main Queue Card */}
-            <Card className="border-0 shadow-2xl bg-white/40 backdrop-blur-xl rounded-[2.5rem] overflow-hidden">
-                <CardHeader className="flex flex-col md:flex-row items-center justify-between space-y-4 md:space-y-0 p-8 border-b border-white/20 bg-white/30">
-                    <CardTitle className="text-2xl font-black flex items-center gap-3">
-                        <span className="w-2 h-8 bg-primary rounded-full"></span>
-                        Liste des Camions
-                    </CardTitle>
+            {/* Category Boards Grid */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                {Object.entries(queueStatus).map(([prefix, data]) => {
+                    const filteredTickets = data.tickets.filter(t =>
+                        t.licensePlate.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                        t.driverName.toLowerCase().includes(searchQuery.toLowerCase())
+                    );
 
-                    <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-                        <div className="relative flex-1 md:w-80 group">
-                            <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 h-5 w-5 text-text-muted group-focus-within:text-primary transition-colors" />
-                            <input
-                                placeholder="Rechercher (matricule, client)..."
-                                className="w-full h-12 pl-11 pr-4 rounded-xl border border-white/40 bg-white/50 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary/30 transition-all placeholder:text-text-muted/50 text-text-main shadow-sm"
-                                value={searchQuery}
-                                onChange={e => setSearchQuery(e.target.value)}
-                            />
-                        </div>
+                    if (searchQuery && filteredTickets.length === 0) return null;
 
-                        {/* Department Filter Pills */}
-                        {(!user?.department || user.department === 'ALL') && (
-                            <div className="flex bg-white/30 p-1.5 rounded-xl border border-white/30 backdrop-blur-sm shadow-sm">
-                                <button onClick={() => setFilterDepartment(null)} className={cn("px-4 py-2 rounded-lg text-xs font-bold transition-all", !filterDepartment ? "bg-white text-text-main shadow-sm" : "text-text-muted hover:bg-white/50")}>TOUS</button>
-                                {(['INFRA', 'ELECT', 'BATIMENT'] as const).map(dept => (
-                                    <button key={dept} onClick={() => setFilterDepartment(dept)} className={cn("px-4 py-2 rounded-lg text-xs font-bold transition-all", filterDepartment === dept ? "bg-primary text-white shadow-md shadow-primary/20" : "text-text-muted hover:bg-white/50")}>{dept}</button>
-                                ))}
+                    return (
+                        <div key={prefix} className="flex flex-col gap-4 animate-in slide-in-from-bottom-4 duration-500">
+                            <div className="flex items-center justify-between px-2">
+                                <div className="flex items-center gap-3">
+                                    <div className="w-1.5 h-6 rounded-full" style={{ backgroundColor: data.category.color }} />
+                                    <h3 className="text-2xl font-black tracking-tight text-text-main uppercase">{data.category.name}</h3>
+                                </div>
+                                <Badge variant="secondary" className="bg-white/50 backdrop-blur-sm text-text-main font-bold px-3 py-1 rounded-full border-white/40">
+                                    {data.count} camions
+                                </Badge>
                             </div>
-                        )}
 
-                        {/* Priority Filter Pills */}
-                        <div className="flex bg-white/30 p-1.5 rounded-xl border border-white/30 backdrop-blur-sm shadow-sm">
-                            <button onClick={() => setFilterPriority(null)} className={cn("px-4 py-2 rounded-lg text-xs font-bold transition-all", !filterPriority ? "bg-white text-text-main shadow-sm" : "text-text-muted hover:bg-white/50")}>Tous</button>
-                            <button onClick={() => setFilterPriority('CRITIQUE')} className={cn("px-4 py-2 rounded-lg text-xs font-bold transition-all", filterPriority === 'CRITIQUE' ? "bg-danger text-white shadow-md shadow-danger/20" : "text-text-muted hover:bg-white/50")}>Critique</button>
-                            <button onClick={() => setFilterPriority('URGENT')} className={cn("px-4 py-2 rounded-lg text-xs font-bold transition-all", filterPriority === 'URGENT' ? "bg-warning text-white shadow-md shadow-warning/20" : "text-text-muted hover:bg-white/50")}>Urgent</button>
-                        </div>
-                    </div>
-                </CardHeader>
+                            <Card className="border-0 shadow-xl bg-white/40 backdrop-blur-xl rounded-[2rem] overflow-hidden flex-1 border border-white/20">
+                                <CardContent className="p-4 space-y-4">
+                                    {filteredTickets.map((ticket) => (
+                                        <div
+                                            key={ticket.id}
+                                            className={cn(
+                                                "relative p-5 rounded-2xl border transition-all duration-300 group hover:shadow-2xl hover:-translate-y-1 overflow-hidden",
+                                                ticket.priority === 'CRITIQUE' ? "bg-danger/5 border-danger/30 shadow-danger/5" :
+                                                    ticket.priority === 'URGENT' ? "bg-warning/5 border-warning/30 shadow-warning/5" :
+                                                        "bg-white/60 border-white/50 shadow-sm"
+                                            )}
+                                        >
+                                            {/* Priority Glow Effect */}
+                                            {ticket.priority !== 'NORMAL' && (
+                                                <div className={cn(
+                                                    "absolute top-0 right-0 w-24 h-24 rounded-full blur-3xl -mr-10 -mt-10 opacity-40",
+                                                    ticket.priority === 'CRITIQUE' ? "bg-danger" : "bg-warning"
+                                                )} />
+                                            )}
 
-                <CardContent className="p-0">
-                    <div className="overflow-x-auto">
-                        <Table>
-                            <TableHeader>
-                                <TableRow className="border-b border-white/20 hover:bg-transparent bg-white/20">
-                                    <TableHead className="w-[80px] text-center font-bold text-text-main py-6">N°</TableHead>
-                                    <TableHead className="font-bold text-text-main">MATRICULE</TableHead>
-                                    <TableHead className="hidden md:table-cell font-bold text-text-main">DÉPT.</TableHead>
-                                    <TableHead className="hidden lg:table-cell font-bold text-text-main">CLIENT</TableHead>
-                                    <TableHead className="hidden md:table-cell font-bold text-text-main">ARRIVÉE</TableHead>
-                                    <TableHead className="font-bold text-text-main">PRIORITÉ</TableHead>
-                                    <TableHead className="font-bold text-text-main">STATUT</TableHead>
-                                    <TableHead className="text-right font-bold text-text-main pr-8">ACTIONS</TableHead>
-                                </TableRow>
-                            </TableHeader>
-                            <TableBody>
-                                {filteredQueue.map((truck, idx) => (
-                                    <TableRow
-                                        key={truck.id}
-                                        className={cn(
-                                            "border-b border-white/10 transition-all duration-200 group hover:shadow-md cursor-default",
-                                            truck.priority === 'CRITIQUE' ? "bg-danger/5 hover:bg-danger/10" : "hover:bg-white/50",
-                                            truck.status === 'APPELÉ' && "bg-success/5 hover:bg-success/10"
-                                        )}
-                                    >
-                                        <TableCell className="text-center">
-                                            <div className={cn(
-                                                "h-10 w-10 rounded-2xl flex items-center justify-center mx-auto text-sm font-black shadow-sm transition-transform group-hover:scale-110",
-                                                truck.priority === 'CRITIQUE' ? "bg-danger text-white shadow-danger/30" :
-                                                    truck.priority === 'URGENT' ? "bg-warning text-white shadow-warning/30" :
-                                                        "bg-white text-text-muted border border-white/50"
-                                            )}>
-                                                {idx + 1}
+                                            <div className="flex items-start justify-between relative z-10">
+                                                <div className="flex items-center gap-3">
+                                                    <div className={cn(
+                                                        "h-10 w-10 rounded-xl flex items-center justify-center text-sm font-black shadow-inner",
+                                                        ticket.priority === 'CRITIQUE' ? "bg-danger text-white" :
+                                                            ticket.priority === 'URGENT' ? "bg-warning text-white" :
+                                                                "bg-primary/10 text-primary"
+                                                    )}>
+                                                        {ticket.position}
+                                                    </div>
+                                                    <div>
+                                                        <div className="font-black text-xl tracking-tight text-text-main font-mono">
+                                                            {ticket.licensePlate}
+                                                        </div>
+                                                        <div className="text-xs font-bold text-text-muted/70 uppercase flex items-center gap-1.5">
+                                                            <Clock className="h-3 w-3" />
+                                                            Attente : {ticket.estimatedWait} min
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                                <Badge
+                                                    variant={priorityMap[ticket.priority as TruckPriority].variant}
+                                                    className="px-2 py-0.5 text-[10px] font-black uppercase tracking-widest border-0"
+                                                >
+                                                    {ticket.priority}
+                                                </Badge>
                                             </div>
-                                        </TableCell>
-                                        <TableCell>
-                                            <div className="font-black text-lg tracking-tight bg-white/50 inline-block px-2 py-1 rounded-md border border-white/20 shadow-sm font-mono">
-                                                {truck.licensePlate}
-                                            </div>
-                                        </TableCell>
-                                        <TableCell className="hidden md:table-cell">
-                                            <Badge variant="outline" className="font-mono text-[10px] px-2 py-0.5 bg-white/50 border-white/40">
-                                                {truck.categories?.[truck.currentCategoryIndex || 0] || 'TP'}
-                                            </Badge>
-                                        </TableCell>
-                                        <TableCell className="hidden lg:table-cell">
-                                            <span className="font-semibold text-text-main">{truck.companyName}</span>
-                                        </TableCell>
-                                        <TableCell className="hidden md:table-cell">
-                                            <div className="flex items-center gap-1.5 text-sm font-medium bg-white/30 px-2 py-1 rounded-lg w-fit">
-                                                <Clock className="h-3.5 w-3.5 text-text-muted" />
-                                                {new Date(truck.arrivedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                            </div>
-                                        </TableCell>
-                                        <TableCell>
-                                            <Badge
-                                                variant={priorityMap[truck.priority].variant}
-                                                className={cn("px-3 py-1 text-xs border-0 backdrop-blur-xl transition-all", priorityMap[truck.priority].glow)}
-                                            >
-                                                {priorityMap[truck.priority].label}
-                                            </Badge>
-                                        </TableCell>
-                                        <TableCell>
-                                            <span className={cn(
-                                                "inline-flex items-center rounded-xl px-3 py-1 text-xs font-bold ring-1 ring-inset shadow-sm uppercase tracking-wide",
-                                                truck.status === 'APPELÉ' ? "bg-success text-white ring-success/20 shadow-success/20 animate-pulse" :
-                                                    truck.status === 'PESÉ_ENTRÉE' ? "bg-blue-100 text-blue-700 ring-blue-700/10" :
-                                                        truck.status === 'EN_CHARGEMENT' ? "bg-purple-100 text-purple-700 ring-purple-700/10" :
-                                                            truck.status === 'CHARGEMENT_TERMINÉ' ? "bg-indigo-100 text-indigo-700 ring-indigo-700/10" :
-                                                                truck.status === 'PESÉ_SORTIE' ? "bg-orange-100 text-orange-700 ring-orange-700/10" :
-                                                                    "bg-white text-primary ring-primary/20"
-                                            )}>
-                                                {truck.status === 'APPELÉ' ? 'Appelé' :
-                                                    truck.status === 'PESÉ_ENTRÉE' ? 'En Attente (Pesé)' :
-                                                        truck.status === 'EN_CHARGEMENT' ? 'En Chargement' :
-                                                            truck.status === 'CHARGEMENT_TERMINÉ' ? 'Chargé' :
-                                                                truck.status === 'PESÉ_SORTIE' ? 'Pesé Sortie' :
-                                                                    'En Attente'}
-                                            </span>
-                                        </TableCell>
-                                        <TableCell className="text-right pr-6">
-                                            <div className="flex items-center justify-end gap-2 opacity-80 group-hover:opacity-100 transition-opacity">
-                                                {(truck.status === 'EN_VENTE' || truck.status === 'PESÉ_ENTRÉE') && ['MANAGER', 'SUPERVISOR', 'ADMINISTRATOR', 'AGENT_QUAI'].includes(user?.role || '') && (
-                                                    <>
+
+                                            <div className="mt-4 flex items-center justify-between border-t border-black/5 pt-4">
+                                                <div className="flex flex-col">
+                                                    <span className="text-[10px] font-bold text-text-muted leading-none">CHAUFFEUR</span>
+                                                    <span className="text-sm font-bold text-text-main truncate max-w-[120px]">{ticket.driverName}</span>
+                                                </div>
+
+                                                <div className="flex items-center gap-1.5">
+                                                    {ticket.status === 'EN_ATTENTE' || ticket.status === 'PESÉ_ENTRÉE' ? (
                                                         <Button
                                                             size="sm"
-                                                            className="bg-success/10 text-success hover:bg-success hover:text-white border border-success/20 shadow-none hover:shadow-lg hover:shadow-success/30 transition-all rounded-xl"
-                                                            onClick={() => handleCall(truck.id)}
+                                                            className="h-9 px-4 bg-primary text-white hover:bg-primary/90 shadow-lg shadow-primary/20 rounded-xl font-bold text-xs group"
+                                                            onClick={() => handleCall(ticket.id, prefix)}
                                                         >
-                                                            <Megaphone className="h-4 w-4 mr-2" />
-                                                            Appeler
+                                                            <Megaphone className="h-3.5 w-3.5 mr-2 group-hover:scale-125 transition-transform" />
+                                                            APPELER
                                                         </Button>
-                                                        {['MANAGER', 'SUPERVISOR', 'ADMINISTRATOR'].includes(user?.role || '') && (
-                                                            <Button
-                                                                size="sm"
-                                                                variant="ghost"
-                                                                className="text-warning hover:text-warning hover:bg-warning/10 rounded-xl"
-                                                                onClick={() => handlePriorityClick(truck.id, truck.priority)}
-                                                            >
-                                                                <ArrowUp className="h-4 w-4" />
-                                                            </Button>
-                                                        )}
-                                                    </>
-                                                )}
-                                                <Button
-                                                    size="sm"
-                                                    variant="ghost"
-                                                    onClick={() => openDetailsModal(truck.id)}
-                                                    className="text-text-muted hover:text-primary hover:bg-primary/5 rounded-xl"
-                                                    title="Détails du parcours"
-                                                >
-                                                    <Eye className="h-4 w-4" />
-                                                </Button>
-                                                <Button
-                                                    size="sm"
-                                                    variant="ghost"
-                                                    onClick={() => printTicket(truck)}
-                                                    className="text-text-muted hover:text-text-main hover:bg-white/50 rounded-xl"
-                                                    title="Réimprimer"
-                                                >
-                                                    <Printer className="h-4 w-4" />
-                                                </Button>
-                                                {['SUPERVISOR', 'MANAGER', 'ADMINISTRATOR', 'AGENT_QUAI'].includes(user?.role || '') && (
-                                                    <Button
-                                                        size="sm"
-                                                        variant="ghost"
-                                                        onClick={() => openTransferModal(truck.id, truck.categories?.[truck.currentCategoryIndex || 0] || '')}
-                                                        className="text-primary hover:text-primary hover:bg-primary/10 rounded-xl"
-                                                        title="Transférer"
-                                                    >
-                                                        <ArrowRightLeft className="h-4 w-4" />
-                                                    </Button>
-                                                )}
-                                            </div>
-                                        </TableCell>
-                                    </TableRow>
-                                ))}
-                            </TableBody>
-                        </Table>
-                    </div>
+                                                    ) : (
+                                                        <Badge variant="success" className="h-9 px-4 rounded-xl animate-pulse font-black text-xs border-0">
+                                                            {ticket.status === 'APPELÉ' ? 'APPELÉ' : 'EN COURS'}
+                                                        </Badge>
+                                                    )}
 
-                    {filteredQueue.length === 0 && (
-                        <div className="flex flex-col items-center justify-center py-20 text-center">
-                            <div className="bg-white/50 p-6 rounded-full mb-4 shadow-inner">
-                                <TruckIcon className="h-16 w-16 text-text-muted/20" />
-                            </div>
-                            <h3 className="text-xl font-bold text-text-main">Aucun camion dans la file</h3>
-                            <p className="text-text-muted mt-1 max-w-sm">
-                                Il n'y a actuellement aucun camion correspondant à vos critères de recherche.
-                            </p>
+                                                    <TooltipProvider>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <Button
+                                                                    size="icon"
+                                                                    variant="ghost"
+                                                                    className="h-9 w-9 text-text-muted hover:text-primary hover:bg-primary/5 rounded-xl"
+                                                                    onClick={() => handlePriorityClick(ticket.id, ticket.priority)}
+                                                                >
+                                                                    <ArrowUp className="h-4 w-4" />
+                                                                </Button>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent>Priorité</TooltipContent>
+                                                        </Tooltip>
+                                                    </TooltipProvider>
+
+                                                    <TooltipProvider>
+                                                        <Tooltip>
+                                                            <TooltipTrigger asChild>
+                                                                <Button
+                                                                    size="icon"
+                                                                    variant="ghost"
+                                                                    className="h-9 w-9 text-text-muted hover:text-primary hover:bg-primary/5 rounded-xl"
+                                                                    onClick={() => openDetailsModal(ticket.id)}
+                                                                >
+                                                                    <Eye className="h-4 w-4" />
+                                                                </Button>
+                                                            </TooltipTrigger>
+                                                            <TooltipContent>Détails</TooltipContent>
+                                                        </Tooltip>
+                                                    </TooltipProvider>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    ))}
+
+                                    {filteredTickets.length === 0 && (
+                                        <div className="py-12 flex flex-col items-center justify-center opacity-40">
+                                            <div className="p-4 bg-black/5 rounded-full mb-3">
+                                                <RefreshCcw className="h-8 w-8 text-text-muted" />
+                                            </div>
+                                            <p className="font-bold text-xs uppercase tracking-widest text-text-muted">Aucun ticket actif</p>
+                                        </div>
+                                    )}
+                                </CardContent>
+                            </Card>
                         </div>
-                    )}
-                </CardContent>
-            </Card>
+                    );
+                })}
+            </div>
+
+            {/* Empty State if no categories found */}
+            {Object.keys(queueStatus).length === 0 && !isQueueLoading && (
+                <div className="flex flex-col items-center justify-center py-32 text-center bg-white/20 backdrop-blur-md rounded-[3rem] border border-white/30 shadow-inner">
+                    <div className="bg-white/50 p-8 rounded-full mb-6 shadow-xl animate-bounce-slow">
+                        <TruckIcon className="h-20 w-20 text-primary/30" />
+                    </div>
+                    <h3 className="text-3xl font-black text-text-main tracking-tight">Aucun camion en vue</h3>
+                    <p className="text-text-muted mt-2 max-w-sm font-medium">
+                        Les files d'attente sont actuellement vides pour ce site.
+                    </p>
+                </div>
+            )}
+
+            {isQueueLoading && (
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    {[1, 2, 3].map(i => (
+                        <div key={i} className="animate-pulse space-y-4">
+                            <div className="h-8 w-48 bg-white/30 rounded-lg" />
+                            <div className="h-[400px] bg-white/30 rounded-[2.5rem]" />
+                        </div>
+                    ))}
+                </div>
+            )}
 
             {/* Transfer Modal - Styled */}
             {transferModalOpen && (

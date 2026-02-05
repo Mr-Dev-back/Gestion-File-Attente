@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Button } from '../../atoms/ui/button';
 import { useAuthStore } from '../../../stores/useAuthStore';
-import { getMenuItemsForRole } from '../../../utils/menuConfig';
+import { getMenuItems } from '../../../utils/menuConfig';
 
 interface SidebarProps {
     collapsed: boolean;
@@ -19,8 +19,8 @@ export function Sidebar({ collapsed, setCollapsed }: SidebarProps) {
 
     if (!user) return null;
 
-    // Get menu items dynamically based on user role
-    const menuItems = getMenuItemsForRole(user.role);
+    // Get menu items dynamically based on user permissions
+    const menuItems = getMenuItems(user);
 
     return (
         <aside className={cn(

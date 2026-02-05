@@ -9,6 +9,7 @@ export default function Login() {
     const [email, setEmail] = useState('');
     const [password, setPassword] = useState('');
     const [error, setError] = useState<string | null>(null);
+    const [lockInfo, setLockInfo] = useState<{ until: Date } | null>(null);
     const [errorField, setErrorField] = useState<'email' | 'password' | null>(null);
     const { login } = useAuth();
 
@@ -21,8 +22,15 @@ export default function Login() {
             { email, password },
             {
                 onError: (err: any) => {
-                    setError(err.response?.data?.error || 'Échec de la connexion. Vérifiez vos identifiants.');
-                    setErrorField(err.response?.data?.field || null);
+                    const data = err.response?.data;
+                    setError(data?.error || 'Échec de la connexion. Vérifiez vos identifiants.');
+                    setErrorField(data?.field || null);
+
+                    if (data?.code === 'ACCOUNT_LOCKED' && data?.lockUntil) {
+                        setLockInfo({ until: new Date(data.lockUntil) });
+                    } else {
+                        setLockInfo(null);
+                    }
                 }
             }
         );
@@ -69,9 +77,16 @@ export default function Login() {
 
                     <form onSubmit={handleLogin} className="space-y-6">
                         {error && (
-                            <Alert variant="destructive" className="animate-scale-in">
+                            <Alert variant="destructive" className="animate-scale-in border-destructive/50 bg-destructive/10">
                                 <AlertCircle className="h-4 w-4" />
-                                <AlertDescription>{error}</AlertDescription>
+                                <AlertDescription className="space-y-1">
+                                    <p className="font-bold">{error}</p>
+                                    {lockInfo && (
+                                        <p className="text-xs opacity-80 italic">
+                                            Déblocage prévu à : {lockInfo.until.toLocaleTimeString()}
+                                        </p>
+                                    )}
+                                </AlertDescription>
                             </Alert>
                         )}
 

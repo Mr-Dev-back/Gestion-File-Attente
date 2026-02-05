@@ -12,7 +12,8 @@ export interface MenuItem {
     label: string;
     icon: LucideIcon;
     path: string;
-    roles: UserRole[];
+    roles?: UserRole[]; // Optional now
+    requiredPermission?: string;
 }
 
 /**
@@ -23,25 +24,25 @@ const allMenuItems: MenuItem[] = [
         label: 'Borne / Entrée',
         icon: Home,
         path: '/',
-        roles: ['SUPERVISOR', 'MANAGER', 'ADMINISTRATOR', 'AGENT_QUAI']
+        // Public or basic access
     },
     {
         label: 'File d\'Attente',
         icon: ListOrdered,
         path: '/queue',
-        roles: ['SUPERVISOR', 'MANAGER', 'ADMINISTRATOR', 'AGENT_QUAI']
+        requiredPermission: 'queue:read'
     },
     {
         label: 'Pont Bascule',
         icon: Scale,
         path: '/weighing',
-        roles: ['SUPERVISOR', 'ADMINISTRATOR', 'AGENT_QUAI']
+        requiredPermission: 'ticket:status'
     },
     {
         label: 'Administration',
         icon: Settings,
         path: '/admin',
-        roles: ['ADMINISTRATOR', 'SUPERVISOR']
+        requiredPermission: 'config:read' // Or user:read
     }
 ];
 
@@ -76,23 +77,45 @@ const dashboardMenuItems: Record<UserRole, MenuItem> = {
 };
 
 /**
- * Returns the menu items for a specific user role
- * Dashboard is always first, followed by accessible menu items
+ * Returns the menu items for a specific user based on Role AND Permissions
  */
-export const getMenuItemsForRole = (role: UserRole): MenuItem[] => {
-    // Get the dashboard item for this role
+export const getMenuItems = (user: any): MenuItem[] => {
+    if (!user) return [];
+
+    // Get the dashboard item for this role (Legacy/Role-based dashboard still applies)
+    const role = user.role as UserRole;
     const dashboardItem = dashboardMenuItems[role];
 
-    // For operational agents (AGENT_QUAI), only show their main interface
-    if (role === 'AGENT_QUAI') {
-        return [dashboardItem];
-    }
+    // Filter common items based on permissions
+    const accessibleItems = allMenuItems.filter(item => {
+        // If specific roles defined, check them (Legacy support)
+        if (item.roles && item.roles.length > 0) {
+            if (!item.roles.includes(role)) return false;
+        }
 
+        // Check permission if required
+        if (item.requiredPermission) {
+            // Admin always has access
+            if (role === 'ADMINISTRATOR') return true;
 
+            // Check if user has permission
+            if (!user.permissions?.includes(item.requiredPermission)) {
+                return false;
+            }
+        }
 
-    // For other roles, filter menu items they have access to
-    const accessibleItems = allMenuItems.filter(item => item.roles.includes(role));
+        return true;
+    });
 
-    // Return dashboard first, then other accessible items
-    return [dashboardItem, ...accessibleItems];
+    const items = dashboardItem ? [dashboardItem, ...accessibleItems] : accessibleItems;
+
+    // Deduplicate by path
+    const uniqueItems = items.filter((item, index, self) =>
+        index === self.findIndex((t) => (
+            t.path === item.path
+        ))
+    );
+
+    return uniqueItems;
 };
+export const getMenuItemsForRole = (role: UserRole) => getMenuItems({ role, permissions: [] }); // Fallback

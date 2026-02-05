@@ -24,13 +24,14 @@ export default function Entry() {
 
     const [successTicket, setSuccessTicket] = useState<any>(null);
     const [customerName, setCustomerName] = useState('');
+    const [salesPerson, setSalesPerson] = useState('');
 
     const [formData, setFormData] = useState({
         licensePlate: '',
         driverName: '',
         driverPhone: '',
         orderNumber: '',
-        categories: [] as string[],
+        categories: [] as any[], // Use objects or IDs
         priority: 'NORMAL' as 'NORMAL' | 'URGENT' | 'CRITIQUE',
     });
 
@@ -50,6 +51,7 @@ export default function Entry() {
             priority: 'NORMAL',
         });
         setCustomerName('');
+        setSalesPerson('');
         setSuccessTicket(null);
     };
 
@@ -60,6 +62,19 @@ export default function Entry() {
             const { data } = await api.get(`/tickets/validate-order/${formData.orderNumber}`);
             if (data.exists) {
                 setCustomerName(data.customerName);
+                if (data.commercialName) setSalesPerson(data.commercialName);
+
+                // If the order suggests a category, select it automatically
+                if (data.suggestedCategory) {
+                    const matchedCat = availableCategories.find((c: any) => c.prefix === data.suggestedCategory || c.name === data.suggestedCategory);
+                    if (matchedCat && !formData.categories.find(c => c.id === matchedCat.id)) {
+                        setFormData(prev => ({
+                            ...prev,
+                            categories: [...prev.categories, matchedCat]
+                        }));
+                    }
+                }
+
                 toast(`Commande valide : ${data.customerName}`, 'success');
             } else {
                 toast('Commande introuvable dans Sage X3', 'warning');
@@ -74,7 +89,7 @@ export default function Entry() {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!formData.licensePlate || !formData.driverName || formData.categories.length === 0) {
-            toast('Veuillez remplir les champs obligatoires', 'warning');
+            toast('Veuillez remplir les champs obligatoires (Plaque, Chauffeur, Catégorie)', 'warning');
             return;
         }
 
@@ -83,7 +98,10 @@ export default function Entry() {
             const ticket = await addTruck({
                 ...formData,
                 companyName: customerName || 'PASSAGER',
-                loadedProducts: []
+                customerName: customerName || 'PASSAGER',
+                salesPerson: salesPerson,
+                // Send category IDs to backend
+                categories: formData.categories.map(c => c.id || c)
             } as any);
 
             toast('Ticket généré !', 'success');
@@ -93,6 +111,16 @@ export default function Entry() {
             toast(error.response?.data?.error || 'Erreur lors de l\'enregistrement', 'error');
         } finally {
             setIsLoading(false);
+        }
+    };
+
+    const handlePrint = async (ticket: any) => {
+        try {
+            await api.post(`/tickets/${ticket.id}/log-print`);
+            printTicket(ticket);
+        } catch (error) {
+            console.error('Failed to log print:', error);
+            printTicket(ticket); // Still try to print even if logging fails
         }
     };
 
@@ -261,7 +289,7 @@ export default function Entry() {
                                         <p className="text-xl text-text-muted font-mono tracking-wider">{successTicket.ticketNumber}</p>
                                     </div>
                                     <div className="flex gap-4 justify-center pt-6">
-                                        <Button onClick={() => printTicket(successTicket)} variant="outline" size="lg" className="rounded-full shadow-sm hover:shadow-md transition-all"><Printer className="mr-2 h-5 w-5" />Imprimer le Ticket</Button>
+                                        <Button onClick={() => handlePrint(successTicket)} variant="outline" size="lg" className="rounded-full shadow-sm hover:shadow-md transition-all"><Printer className="mr-2 h-5 w-5" />Imprimer le Ticket</Button>
                                         <Button onClick={handleReset} size="lg" className="rounded-full shadow-lg shadow-primary/20 hover:shadow-primary/40 transition-all">Nouveau Camion</Button>
                                     </div>
                                 </div>
@@ -288,6 +316,17 @@ export default function Entry() {
                                                     value={formData.driverName}
                                                     onChange={e => setFormData({ ...formData, driverName: e.target.value })}
                                                     required
+                                                    className="h-12 bg-white/70 border-border/50 focus:border-primary/50 focus:ring-primary/20 text-lg rounded-xl shadow-sm"
+                                                />
+                                            </div>
+                                        </div>
+                                        <div className="space-y-3 group/input">
+                                            <label className="text-sm font-bold text-text-main uppercase tracking-wider ml-1">Téléphone Chauffeur</label>
+                                            <div className="relative transform transition-all duration-300 focus-within:scale-[1.02]">
+                                                <Input
+                                                    placeholder="0102030405"
+                                                    value={formData.driverPhone}
+                                                    onChange={e => setFormData({ ...formData, driverPhone: e.target.value })}
                                                     className="h-12 bg-white/70 border-border/50 focus:border-primary/50 focus:ring-primary/20 text-lg rounded-xl shadow-sm"
                                                 />
                                             </div>
@@ -322,27 +361,38 @@ export default function Entry() {
                                                 className={`h-12 border-border/50 rounded-xl shadow-sm ${formData.orderNumber ? 'bg-primary/5 font-bold text-primary border-primary/20' : 'bg-white/70'}`}
                                             />
                                         </div>
+                                        <div className="space-y-3 group/input col-span-full">
+                                            <label className="text-sm font-bold text-text-main uppercase tracking-wider ml-1">Commercial / Vendeur</label>
+                                            <Input
+                                                placeholder="Commercial identifié"
+                                                value={salesPerson}
+                                                onChange={e => setSalesPerson(e.target.value)}
+                                                readOnly={!!formData.orderNumber}
+                                                className={`h-12 border-border/50 rounded-xl shadow-sm ${formData.orderNumber && salesPerson ? 'bg-primary/5 font-bold text-primary border-primary/20' : 'bg-white/70'}`}
+                                            />
+                                        </div>
                                     </div>
 
                                     <div className="space-y-4">
                                         <label className="text-sm font-bold text-text-main uppercase tracking-wider ml-1">Type d'opération *</label>
                                         <div className="flex flex-wrap gap-3">
-                                            {isLoadingCats ? <Loader2 className="h-6 w-6 animate-spin text-primary" /> : availableCategories.map(cat => (
+                                            {isLoadingCats ? <Loader2 className="h-6 w-6 animate-spin text-primary" /> : availableCategories.map((cat: any) => (
                                                 <Badge
                                                     key={cat.id}
-                                                    variant={formData.categories.includes(cat.name) ? "default" : "outline"}
-                                                    className={`cursor-pointer py-2.5 px-5 text-sm rounded-full transition-all duration-300 border shadow-sm hover:shadow-md hover:scale-105 active:scale-95 ${formData.categories.includes(cat.name)
-                                                            ? 'bg-primary border-primary text-white shadow-primary/20'
-                                                            : 'bg-white border-border/60 hover:border-primary/30 hover:bg-primary/5'
+                                                    variant={formData.categories.find(c => c.id === cat.id) ? "default" : "outline"}
+                                                    className={`cursor-pointer py-2.5 px-5 text-sm rounded-full transition-all duration-300 border shadow-sm hover:shadow-md hover:scale-105 active:scale-95 ${formData.categories.find(c => c.id === cat.id)
+                                                        ? 'bg-primary border-primary text-white shadow-primary/20'
+                                                        : 'bg-white border-border/60 hover:border-primary/30 hover:bg-primary/5'
                                                         }`}
                                                     onClick={() => {
-                                                        const newCats = formData.categories.includes(cat.name)
-                                                            ? formData.categories.filter(c => c !== cat.name)
-                                                            : [...formData.categories, cat.name];
+                                                        const isSelected = formData.categories.find(c => c.id === cat.id);
+                                                        const newCats = isSelected
+                                                            ? formData.categories.filter(c => c.id !== cat.id)
+                                                            : [...formData.categories, cat];
                                                         setFormData({ ...formData, categories: newCats });
                                                     }}
                                                 >
-                                                    {formData.categories.includes(cat.name) && <CheckCircle2 className="h-3.5 w-3.5 mr-2" />}
+                                                    {formData.categories.find(c => c.id === cat.id) && <CheckCircle2 className="h-3.5 w-3.5 mr-2" />}
                                                     {cat.name}
                                                 </Badge>
                                             ))}
