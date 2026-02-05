@@ -1,4 +1,4 @@
-import { Ticket, User, Site, Company } from '../models/index.js';
+import { Ticket, User, Site, Company, Category, AuditLog, Queue } from '../models/index.js';
 import { sequelize } from '../config/database.js';
 import { Op } from 'sequelize';
 import QRCode from 'qrcode';
@@ -16,91 +16,145 @@ class TicketController {
                 driverName,
                 driverPhone,
                 companyName,
-                salesRepresentative,
+                salesPerson,
                 orderNumber,
-                categories, // NEW
+                categories, // Array of category IDs or objects
                 priority,
                 priorityReason,
-                notes,
-                loadedProducts
+                notes
             } = req.body;
 
+            // 1. Récupérer l'agent et son site
+            let agent = null;
+            let site = null;
 
+            if (req.user?.id) {
+                agent = await User.findByPk(req.user.id, {
+                    include: [{ model: Site, as: 'site' }]
+                });
+                if (agent && agent.site) {
+                    site = agent.site;
+                } else {
+                    return res.status(403).json({ error: 'Agent non associé à un site valide.' });
+                }
+            } else {
+                // Anonymous mode (Public Kiosk)
+                // Default to the first active site or a specific one if configured
+                site = await Site.findOne({ where: { isActive: true } });
+                logger.info('Ticket creation: Anonymous mode (Kiosk)');
+            }
 
-            // 1. Validation Sage X3 (Mock)
-            let customerNameFromSage = null;
+            if (!site) {
+                return res.status(500).json({ error: 'Aucun site actif trouvé pour le mode public.' });
+            }
+
+            // 2. Intégration Sage X3 (Refined)
+            let finalClientName = companyName;
+            let finalSalesPerson = salesPerson;
+            let finalCategoryIds = categories ? categories.map(c => typeof c === 'string' ? c : c.id) : [];
+
             if (orderNumber) {
-                const sageValidation = await sageService.validateOrder(orderNumber);
+                const sageData = await sageService.validateOrder(orderNumber);
+                if (sageData.exists) {
+                    finalClientName = sageData.customerName || finalClientName;
+                    finalSalesPerson = sageData.commercialName || finalSalesPerson;
 
-                if (sageValidation.exists) {
-                    // Si elle existe on vérifie si elle est soldée (ici simulated by isPaid)
-                    if (sageValidation.isPaid) {
-                        // Si déjà soldée, on pourrait bloquer ou avertir.
-                        // L'utilisateur dit : "on vérifie si elle soldée, sinon on peut continuer l'enregistrement"
-                        // Traduction : "Si PAS soldée, on continue".
+                    // Si aucune catégorie n'est fournie, on utilise celles de Sage
+                    if (finalCategoryIds.length === 0 && sageData.suggestedCategories?.length > 0) {
+                        const suggestedCategories = await Category.findAll({
+                            where: { prefix: { [Op.in]: sageData.suggestedCategories } }
+                        });
+                        if (suggestedCategories.length > 0) {
+                            finalCategoryIds = suggestedCategories.map(c => c.id);
+                        }
                     }
-                    customerNameFromSage = sageValidation.customerName;
+
+                    if (sageData.paymentStatus === 'UNPAID') {
+                        logger.warn(`Ticket créé pour commande non payée : ${orderNumber}`);
+                    }
                 }
             }
 
-            // 2. Récupérer les infos du site de l'utilisateur
-            const agent = await User.findByPk(req.user?.id, {
-                include: [{ model: Site, as: 'site' }]
+            // 3. Validation finale des données
+            if (!licensePlate || !driverName || finalCategoryIds.length === 0) {
+                return res.status(400).json({
+                    error: 'Données manquantes',
+                    message: 'L\'immatriculation, le chauffeur et au moins une catégorie sont requis.'
+                });
+            }
+
+            // 4. Charger et valider les catégories
+            const fullCategories = await Category.findAll({
+                where: { id: { [Op.in]: finalCategoryIds } }
             });
 
-            // 3. Générer le numéro de ticket
-            const ticketNumber = await Ticket.generateTicketNumber(categories);
+            if (fullCategories.length !== finalCategoryIds.length) {
+                return res.status(400).json({ error: 'Une ou plusieurs catégories sont invalides.' });
+            }
 
-            // 4. Générer le QR Code
+            const inactiveCat = fullCategories.find(c => !c.isActive);
+            if (inactiveCat) {
+                return res.status(400).json({ error: `La catégorie ${inactiveCat.name} est actuellement inactive.` });
+            }
+
+            // 5. Génération du numéro de ticket structuré
+            const siteCode = site.code || 'GFA';
+            const catPrefix = fullCategories[0]?.prefix || 'TP';
+            const ticketPrefix = `TK${siteCode}${catPrefix}`;
+
+            const ticketNumber = await Ticket.generateTicketNumber([{ code: ticketPrefix }]);
             const qrCodeData = await QRCode.toDataURL(ticketNumber);
 
-            // 5. Créer le ticket
+            // 6. Créer le ticket
             const ticket = await Ticket.create({
                 ticketNumber,
                 qrCode: qrCodeData,
-                licensePlate,
+                licensePlate: licensePlate.toUpperCase(),
                 driverName,
                 driverPhone,
-                companyName: customerNameFromSage || companyName,
-                customerName: customerNameFromSage || companyName,
-                salesRepresentative,
+                companyName: finalClientName,
+                salesPerson: finalSalesPerson,
                 orderNumber,
-                categories: categories || [],
+                categories: fullCategories.map(c => c.prefix),
                 priority: priority || 'NORMAL',
                 priorityReason,
                 notes,
-                loadedProducts,
                 createdById: req.user?.id,
-                siteId: agent?.siteId,
-                companyId: agent?.site?.companyId,
+                siteId: site.id,
+                companyId: site.companyId,
                 status: 'EN_ATTENTE',
                 arrivedAt: new Date()
             });
 
-            // 5. Notifier via Socket.io (si disponible)
+            // 7. Audit & Socket
+            await AuditLog.create({
+                userId: req.user?.id,
+                action: 'TICKET_CREATED',
+                entityId: ticket.id,
+                entityType: 'TICKET',
+                details: { ticketNumber: ticket.ticketNumber, licensePlate: ticket.licensePlate, orderNumber: ticket.orderNumber },
+                ipAddress: req.ip
+            });
+
             const io = req.app.get('io');
             if (io) {
                 io.emit('new-ticket', {
                     id: ticket.id,
                     ticketNumber: ticket.ticketNumber,
                     licensePlate: ticket.licensePlate,
-                    status: ticket.status
+                    status: ticket.status,
+                    siteId: ticket.siteId
                 });
-                logger.info(`Notification Socket envoyée pour le ticket ${ticketNumber}`);
+                io.emit('queue-updated', { siteId: ticket.siteId });
             }
 
-            res.status(201).json({
-                message: 'Ticket créé avec succès.',
-                ticket
-            });
+            res.status(201).json({ message: 'Ticket créé avec succès.', ticket });
 
         } catch (error) {
             logger.error('Erreur lors de la création du ticket:', error);
             res.status(500).json({ error: 'Erreur interne lors de la création du ticket.' });
         }
-    }
-
-    /**
+    }  /**
      * Récupérer tous les tickets (avec filtres optionnels)
      */
     async getAllTickets(req, res) {
@@ -162,6 +216,59 @@ class TicketController {
     }
 
     /**
+     * Récupérer un ticket par son numéro (pour scan QR)
+     */
+    async getTicketByNumber(req, res) {
+        try {
+            const ticket = await Ticket.findOne({
+                where: { ticketNumber: req.params.ticketNumber },
+                include: [
+                    { model: Site, as: 'site' },
+                    { model: Company, as: 'company' }
+                ]
+            });
+
+            if (!ticket) {
+                return res.status(404).json({ error: 'Ticket non trouvé.' });
+            }
+
+            res.status(200).json(ticket);
+        } catch (error) {
+            res.status(500).json({ error: error.message });
+        }
+    }
+
+    /**
+     * Journaliser une impression / réimpression de ticket
+     */
+    async logPrint(req, res) {
+        try {
+            const ticket = await Ticket.findByPk(req.params.id);
+            if (!ticket) return res.status(404).json({ error: 'Ticket non trouvé' });
+
+            await ticket.increment('printedCount');
+            await ticket.reload();
+
+            await AuditLog.create({
+                userId: req.user?.id,
+                action: ticket.printedCount > 1 ? 'TICKET_REPRINTED' : 'TICKET_PRINTED',
+                entityId: ticket.id,
+                entityType: 'TICKET',
+                details: {
+                    ticketNumber: ticket.ticketNumber,
+                    printCount: ticket.printedCount
+                },
+                ipAddress: req.ip
+            });
+
+            res.status(200).json({ message: 'Impression journalisée', printedCount: ticket.printedCount });
+        } catch (error) {
+            logger.error('Erreur journalisation impression:', error);
+            res.status(500).json({ error: 'Erreur interne' });
+        }
+    }
+
+    /**
      * Mettre à jour le statut d'un ticket (Avec validation BPM)
      */
     async updateTicketStatus(req, res) {
@@ -197,12 +304,23 @@ class TicketController {
                 }
             }
 
+            // US-015: Justification obligatoire pour la priorité CRITIQUE
+            if (priority === 'CRITIQUE' && !req.body.priorityReason) {
+                return res.status(400).json({
+                    error: 'Justification requise',
+                    message: 'Une justification est obligatoire pour passer un ticket en priorité CRITIQUE.'
+                });
+            }
+
             const updates = {};
             if (status) updates.status = status;
             if (notes) updates.notes = notes;
             if (loadedProducts) updates.loadedProducts = loadedProducts;
             if (zone || callZone) updates.zone = zone || callZone;
-            if (priority) updates.priority = priority;
+            if (priority) {
+                updates.priority = priority;
+                updates.priorityReason = req.body.priorityReason;
+            }
 
             // Logique spécifique selon le statut
             if (status === 'PESÉ_ENTRÉE') {
@@ -249,7 +367,6 @@ class TicketController {
 
             // Audit Log for Priority Change
             if (priority && priority !== ticket.priority) {
-                const AuditLog = (await import('../models/AuditLog.js')).default;
                 await AuditLog.create({
                     entityId: ticket.id,
                     entityType: 'TICKET',
@@ -269,14 +386,23 @@ class TicketController {
             // Notification temps réel du changement de statut
             const io = req.app.get('io');
             if (io) {
-                io.emit('ticket-status-updated', {
+                const payload = {
                     id: ticket.id,
                     ticketNumber: ticket.ticketNumber,
                     licensePlate: ticket.licensePlate,
-                    status: status || ticket.status, // Ensure status is present even if only priority changed
-                    priority: updates.priority || ticket.priority, // NEW
+                    status: status || ticket.status,
+                    priority: updates.priority || ticket.priority,
                     zone: updates.zone || ticket.zone
-                });
+                };
+                io.emit('ticket-status-updated', payload);
+
+                // Si le statut ou la priorité change, on notifie une mise à jour de file
+                if (status || priority) {
+                    io.emit('queue-updated', { siteId: ticket.siteId });
+                    if (ticket.siteId) {
+                        io.to(`site_${ticket.siteId}`).emit('queue-updated', { siteId: ticket.siteId });
+                    }
+                }
             }
 
             res.status(200).json({
@@ -286,6 +412,69 @@ class TicketController {
         } catch (error) {
             logger.error('Erreur mise à jour ticket:', error);
             res.status(500).json({ error: 'Erreur lors de la mise à jour du ticket.' });
+        }
+    }
+
+    /**
+     * US-014: Récupérer l'état des files d'attente agrégé par catégorie
+     */
+    async getQueueStatus(req, res) {
+        try {
+            const { siteId } = req.query;
+            const where = {
+                status: { [Op.in]: ['EN_ATTENTE', 'APPELÉ', 'EN_COURS'] }
+            };
+            if (siteId) where.siteId = siteId;
+
+            const tickets = await Ticket.findAll({
+                where,
+                order: [
+                    [sequelize.literal("CASE WHEN priority = 'CRITIQUE' THEN 1 WHEN priority = 'URGENT' THEN 2 ELSE 3 END"), 'ASC'],
+                    ['arrivedAt', 'ASC']
+                ]
+            });
+
+            const categories = await Category.findAll();
+            const catMap = categories.reduce((acc, cat) => {
+                acc[cat.prefix] = cat;
+                return acc;
+            }, {});
+
+            const queueData = {};
+
+            tickets.forEach(ticket => {
+                const currentCatPrefix = ticket.categories[ticket.currentCategoryIndex] || (ticket.categories.length > 0 ? ticket.categories[0] : 'BAT');
+
+                if (!queueData[currentCatPrefix]) {
+                    queueData[currentCatPrefix] = {
+                        category: catMap[currentCatPrefix] || { name: currentCatPrefix, prefix: currentCatPrefix },
+                        tickets: [],
+                        count: 0
+                    };
+                }
+
+                const catTickets = queueData[currentCatPrefix].tickets;
+                const position = catTickets.length + 1;
+                const estimatedWait = (position - 1) * (catMap[currentCatPrefix]?.estimatedDuration || 30);
+
+                catTickets.push({
+                    id: ticket.id,
+                    ticketNumber: ticket.ticketNumber,
+                    licensePlate: ticket.licensePlate,
+                    driverName: ticket.driverName,
+                    status: ticket.status,
+                    priority: ticket.priority,
+                    arrivedAt: ticket.arrivedAt,
+                    position,
+                    estimatedWait
+                });
+                queueData[currentCatPrefix].count++;
+            });
+
+            res.status(200).json(queueData);
+        } catch (error) {
+            logger.error('Erreur getQueueStatus:', error);
+            res.status(500).json({ error: 'Erreur lors de la récupération des files.' });
         }
     }
 

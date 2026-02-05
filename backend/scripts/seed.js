@@ -45,14 +45,12 @@ async function seed() {
 
         // 3. Queues (Linked to Workflow and Site)
         console.log('Seeding Queues...');
-        const qAccueil = await Queue.create({ name: 'File Accueil', siteId: site.id, workflowId: workflow.id, priority: 1 });
         const qVente = await Queue.create({ name: 'File Bureau Vente', siteId: site.id, workflowId: workflow.id, priority: 2 });
         const qPesee = await Queue.create({ name: 'File Pont Bascule', siteId: site.id, workflowId: workflow.id, priority: 3 });
 
         // 4. Workflow Steps (Linked to Workflow AND specific Queues)
         console.log('Seeding Workflow Steps...');
         const steps = await WorkflowStep.bulkCreate([
-            { workflowId: workflow.id, queueId: qAccueil.id, name: 'Enregistrement', order: 1, isInitial: true, code: 'WAITING' },
             { workflowId: workflow.id, queueId: qVente.id, name: 'Vente', order: 2, code: 'SALES' },
             { workflowId: workflow.id, queueId: qPesee.id, name: 'Pesée Entrée', order: 3, code: 'WEIGH_IN' },
             { workflowId: workflow.id, queueId: null, name: 'Chargement', order: 4, code: 'LOADING' }, // Indirect step

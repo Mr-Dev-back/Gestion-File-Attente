@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import http from 'http';
 import cookieParser from 'cookie-parser';
 import { Server } from 'socket.io';
+import { createAdapter } from '@socket.io/redis-adapter';
 import { sequelize } from './config/database.js';
 import { redisClient } from './config/redis.js';
 import logger from './config/logger.js';
@@ -24,6 +25,8 @@ import systemSettingRoutes from './routes/systemSettingRoutes.js';
 import workflowRoutes from './routes/workflowRoutes.js';
 import queueRoutes from './routes/queueRoutes.js';
 import kioskRoutes from './routes/kioskRoutes.js';
+import { authLimiter } from './middlewares/auth.limiter.js';
+import cleanupService from './services/cleanupService.js';
 
 dotenv.config();
 
@@ -42,10 +45,10 @@ import rateLimit from 'express-rate-limit';
 
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 1000, // Increased limit for development/testing
+  max: 300, // Limite raisonnable pour les requêtes API (hors auth)
   standardHeaders: true,
   legacyHeaders: false,
-  message: 'Trop de requêtes, veuillez réessayer plus tard.'
+  message: { error: 'Trop de requêtes, veuillez réessayer plus tard.' }
 });
 
 // Middlewares
@@ -78,7 +81,7 @@ app.get('/health', (req, res) => {
 // Documentation Swagger
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-app.use('/api/auth', authRoutes);
+app.use('/api/auth', authLimiter, authRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/tickets', ticketRoutes);
 app.use('/api/companies', companyRoutes);
@@ -108,6 +111,18 @@ app.use((err, req, res, next) => {
 io.on('connection', (socket) => {
   logger.info(`Client connecté: ${socket.id}`);
 
+  // Rejoindre une room de site
+  socket.on('join-site', (siteId) => {
+    socket.join(`site_${siteId}`);
+    logger.info(`Client ${socket.id} a rejoint le site: ${siteId}`);
+  });
+
+  // Rejoindre une room de file d'attente
+  socket.on('join-queue', (queueId) => {
+    socket.join(`queue_${queueId}`);
+    logger.info(`Client ${socket.id} a rejoint la file: ${queueId}`);
+  });
+
   socket.on('join-room', (room) => {
     socket.join(room);
     logger.info(`Client ${socket.id} a rejoint la room: ${room}`);
@@ -133,12 +148,15 @@ async function startServer() {
       logger.info('Models synchronisés (alter: true)');
     }
 
-    // Test connexion Redis
+    // Test connexion Redis & Adapter Socket.io
     try {
       await redisClient.connect();
-      logger.info('Connexion Redis établie');
+      const subClient = redisClient.duplicate();
+      await subClient.connect();
+      io.adapter(createAdapter(redisClient, subClient));
+      logger.info('Connexion Redis et Adapter Socket.io établis');
     } catch (redisError) {
-      logger.warn('Impossible de se connecter à Redis. Le serveur continuera sans cache.');
+      logger.warn('Impossible de se connecter à Redis. Le serveur continuera sans broker WebSocket.');
       logger.error(redisError.message);
     }
 
@@ -146,6 +164,9 @@ async function startServer() {
     server.listen(PORT, () => {
       logger.info(`Serveur démarré sur le port ${PORT}`);
       logger.info(`Environnement: ${process.env.NODE_ENV}`);
+
+      // Démarrer les services d'arrière-plan
+      cleanupService.start();
     });
   } catch (error) {
     logger.error('Erreur de démarrage:', error);

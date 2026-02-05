@@ -11,6 +11,9 @@ const router = express.Router();
  *   description: Gestion des tickets de file d'attente
  */
 
+// Don't protect validate-order if it needs to be public for kiosks (optional)
+// But createTicket AND queue-status definitely need it.
+
 /**
  * @swagger
  * /api/tickets:
@@ -48,8 +51,6 @@ const router = express.Router();
  *       200:
  *         description: Liste des tickets
  */
-router.post('/', ticketController.createTicket);
-router.get('/', ticketController.getAllTickets);
 
 /**
  * @swagger
@@ -69,25 +70,28 @@ router.get('/', ticketController.getAllTickets);
  */
 router.get('/validate-order/:orderNumber', ticketController.validateOrder);
 
+router.post('/', ticketController.createTicket);
+router.get('/', ticketController.getAllTickets);
+
+// All other routes require authentication
+router.use(authMiddleware.authenticate);
+
 /**
  * @swagger
- * /api/tickets/{id}/validate-exit:
- *   put:
- *     summary: Valider la sortie d'un camion
+ * /api/tickets/queue-status:
+ *   get:
+ *     summary: Récupérer l'état des files d'attente par catégorie
  *     tags: [Tickets]
  *     parameters:
- *       - in: path
- *         name: id
- *         required: true
+ *       - in: query
+ *         name: siteId
  *         schema:
  *           type: string
  *     responses:
  *       200:
- *         description: Sortie validée
+ *         description: État des files d'attente
  */
-router.put('/:id/validate-exit', ticketController.validateExit);
-
-router.use(authMiddleware.authenticate);
+router.get('/queue-status', ticketController.getQueueStatus);
 
 /**
  * @swagger
@@ -123,6 +127,11 @@ router.get('/stats', ticketController.getStats);
  */
 router.get('/:id', ticketController.getTicketById);
 
+// Impression & Scan (Accessibles par la guérite sans session complète si nécessaire,
+// ou protégés par le fait qu'ils nécessitent un ID/numéro valide connu de l'agent)
+router.get('/scan/:ticketNumber', ticketController.getTicketByNumber);
+
+// Operations with specific authorization
 /**
  * @swagger
  * /api/tickets/{id}/status:
@@ -150,7 +159,7 @@ router.get('/:id', ticketController.getTicketById);
  *       200:
  *         description: Statut mis à jour
  */
-router.put('/:id/status', authMiddleware.authorize('SUPERVISOR', 'AGENT_QUAI', 'ADMINISTRATOR'), ticketController.updateTicketStatus);
+router.put('/:id/status', authMiddleware.hasPermission('ticket:status'), ticketController.updateTicketStatus);
 
 /**
  * @swagger
@@ -180,10 +189,30 @@ router.put('/:id/status', authMiddleware.authorize('SUPERVISOR', 'AGENT_QUAI', '
  *         description: Ticket transféré
  */
 // Transfert
-router.put('/:id/transfer', authMiddleware.authorize('SUPERVISOR', 'AGENT_QUAI', 'ADMINISTRATOR'), ticketController.transferTicket);
+router.put('/:id/transfer', authMiddleware.hasPermission('queue:manage'), ticketController.transferTicket);
 
 // Pesée
-router.post('/:id/weigh-in', authMiddleware.authorize('SUPERVISOR', 'AGENT_QUAI', 'ADMINISTRATOR'), ticketController.weighIn);
-router.post('/:id/weigh-out', authMiddleware.authorize('SUPERVISOR', 'AGENT_QUAI', 'ADMINISTRATOR'), ticketController.weighOut);
+router.post('/:id/weigh-in', authMiddleware.hasPermission('ticket:status'), ticketController.weighIn);
+router.post('/:id/weigh-out', authMiddleware.hasPermission('ticket:status'), ticketController.weighOut);
+
+/**
+ * @swagger
+ * /api/tickets/{id}/validate-exit:
+ *   put:
+ *     summary: Valider la sortie d'un camion
+ *     tags: [Tickets]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Sortie validée
+ */
+router.put('/:id/validate-exit', ticketController.validateExit);
+router.post('/:id/log-print', ticketController.logPrint);
+
 
 export default router;

@@ -1,5 +1,5 @@
 import jwt from 'jsonwebtoken';
-import { User, Site } from '../models/index.js';
+import { User, Site, Role, Permission } from '../models/index.js';
 
 class AuthMiddleware {
     // Middleware d'authentification (Vérification JWT)
@@ -20,11 +20,21 @@ class AuthMiddleware {
             const decoded = jwt.verify(token, process.env.JWT_SECRET || 'votre_secret_jwt_tres_long_et_aleatoire_12345');
 
             const user = await User.findByPk(decoded.id, {
-                include: [{
-                    model: Site, // We need to import Site
-                    as: 'site',
-                    include: ['company'] // We need deep include for Company check
-                }]
+                include: [
+                    {
+                        model: Site, // We need to import Site
+                        as: 'site',
+                        include: ['company'] // We need deep include for Company check
+                    },
+                    {
+                        model: Role,
+                        as: 'assignedRole',
+                        include: [{
+                            model: Permission,
+                            as: 'permissions'
+                        }]
+                    }
+                ]
             });
             if (!user) {
                 return res.status(401).json({ error: 'Utilisateur non trouvé.' });
@@ -35,6 +45,19 @@ class AuthMiddleware {
             }
 
             req.user = user;
+
+            // Map permissions to a simple array of codes
+            if (user.assignedRole && user.assignedRole.permissions) {
+                req.user.permissionCodes = user.assignedRole.permissions.map(p => p.code);
+            } else {
+                req.user.permissionCodes = [];
+            }
+
+            // Allow Admin to have all permissions implicitly (optional but good for safety)
+            if (user.role === 'ADMINISTRATOR') {
+                // We could fill all, or just handle it in hasPermission
+            }
+
             next();
         } catch (error) {
             console.error('AUTHENTICATION ERROR:', error);
@@ -43,6 +66,31 @@ class AuthMiddleware {
             }
             return res.status(401).json({ error: 'Token invalide.' });
         }
+    }
+
+    /**
+     * Check if user has a specific permission
+     * @param {string} requiredPermission e.g. 'ticket:create'
+     */
+    hasPermission(requiredPermission) {
+        return (req, res, next) => {
+            if (!req.user) {
+                return res.status(401).json({ error: 'Utilisateur non authentifié.' });
+            }
+
+            if (req.user.role === 'ADMINISTRATOR') {
+                return next();
+            }
+
+            if (!req.user.permissionCodes || !req.user.permissionCodes.includes(requiredPermission)) {
+                return res.status(403).json({
+                    error: 'Accès refusé. Permission requise.',
+                    required: requiredPermission
+                });
+            }
+
+            next();
+        };
     }
 
     // Middleware d'autorisation (RBAC)

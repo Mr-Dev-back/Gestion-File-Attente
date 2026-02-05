@@ -7,20 +7,24 @@ class Ticket extends Model {
     const dateStr = today.toISOString().slice(0, 10).replace(/-/g, '');
     let prefix = 'TK';
     if (categoriesData && categoriesData.length > 0) {
-      if (typeof categoriesData[0] === 'object' && categoriesData[0].prefix) {
-        prefix = categoriesData[0].prefix;
+      if (typeof categoriesData[0] === 'object' && categoriesData[0].code) {
+        prefix = categoriesData[0].code;
       } else if (typeof categoriesData[0] === 'string') {
         prefix = categoriesData[0].substring(0, 3).toUpperCase();
       }
     }
+
+    // Format: TKSITECATEGORIE-YYYYMMDD-XXX
+    // We'll simplify for now as SITECAT-YYYYMMDD-XXX if we can get site info
+
     const lastTicket = await this.findOne({
       where: { ticketNumber: { [Op.like]: `${prefix}-${dateStr}-%` } },
-      order: [['created_at', 'DESC']]
+      order: [['createdAt', 'DESC']]
     });
     let sequence = 1;
     if (lastTicket) {
       const parts = lastTicket.ticketNumber.split('-');
-      const lastSequence = parseInt(parts[2]);
+      const lastSequence = parseInt(parts[parts.length - 1]);
       if (!isNaN(lastSequence)) sequence = lastSequence + 1;
     }
     return `${prefix}-${dateStr}-${sequence.toString().padStart(3, '0')}`;
@@ -64,6 +68,27 @@ Ticket.init({
     type: DataTypes.STRING,
     field: 'company_name'
   },
+  driverPhone: {
+    type: DataTypes.STRING,
+    field: 'driver_phone'
+  },
+  salesPerson: {
+    type: DataTypes.STRING,
+    field: 'sales_person'
+  },
+  orderNumber: {
+    type: DataTypes.STRING,
+    field: 'order_number'
+  },
+  qrCode: {
+    type: DataTypes.TEXT,
+    field: 'qr_code'
+  },
+  printedCount: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    field: 'printed_count'
+  },
   siteId: {
     type: DataTypes.UUID,
     allowNull: false,
@@ -90,6 +115,11 @@ Ticket.init({
     allowNull: false,
     defaultValue: []
   },
+  currentCategoryIndex: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    field: 'current_category_index'
+  },
   status: {
     type: DataTypes.ENUM(
       'EN_ATTENTE', 'APPELÉ', 'EN_COURS', 'TERMINÉ', 'ANNULÉ'
@@ -101,6 +131,10 @@ Ticket.init({
     type: DataTypes.ENUM('NORMAL', 'URGENT', 'CRITIQUE'),
     defaultValue: 'NORMAL',
     allowNull: false
+  },
+  priorityReason: {
+    type: DataTypes.STRING,
+    field: 'priority_reason'
   },
   arrivedAt: {
     type: DataTypes.DATE,

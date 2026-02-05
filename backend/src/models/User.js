@@ -31,8 +31,17 @@ User.init({
         type: DataTypes.STRING,
         allowNull: false
     },
+    roleId: {
+        type: DataTypes.UUID,
+        allowNull: true,
+        field: 'role_id',
+        references: {
+            model: 'roles',
+            key: 'id'
+        }
+    },
     role: {
-        type: DataTypes.ENUM('ADMINISTRATOR', 'SUPERVISOR', 'MANAGER', 'AGENT_QUAI'),
+        type: DataTypes.ENUM('ADMINISTRATOR', 'SUPERVISOR', 'MANAGER', 'AGENT_QUAI', 'AGENT_GUERITE'),
         defaultValue: 'MANAGER'
     },
 
@@ -82,10 +91,26 @@ User.init({
             if (user.password) {
                 user.password = await bcrypt.hash(user.password, 10);
             }
+            // Auto-assign roleId based on role ENUM if not present
+            if (user.role && !user.roleId) {
+                const Role = sequelize.models.Role;
+                if (Role) {
+                    const roleRecord = await Role.findOne({ where: { name: user.role } });
+                    if (roleRecord) user.roleId = roleRecord.id;
+                }
+            }
         },
         beforeUpdate: async (user) => {
             if (user.changed('password')) {
                 user.password = await bcrypt.hash(user.password, 10);
+            }
+            // Sync roleId if role ENUM changes
+            if (user.changed('role')) {
+                const Role = sequelize.models.Role;
+                if (Role) {
+                    const roleRecord = await Role.findOne({ where: { name: user.role } });
+                    if (roleRecord) user.roleId = roleRecord.id;
+                }
             }
         }
     }

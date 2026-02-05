@@ -2,15 +2,16 @@ import crypto from 'crypto';
 import jwt from 'jsonwebtoken';
 import { Op } from 'sequelize';
 import { sequelize } from '../config/database.js';
-import { User, LoginHistory, RefreshToken } from '../models/index.js';
+import { User, LoginHistory, RefreshToken, Role, Permission } from '../models/index.js';
 import emailService from '../services/emailService.js';
 
 class AuthController {
 
     async register(req, res) {
+        // ... (unchanged)
         try {
             const { username, email, password, role } = req.body;
-
+            // ... (keep original logic)
             // Vérifier si l'utilisateur existe déjà
             const existingUser = await User.findOne({
                 where: { email }
@@ -20,7 +21,6 @@ class AuthController {
                 return res.status(400).json({ error: 'Cet email est déjà utilisé.' });
             }
 
-            // Créer l'utilisateur (le hashing du mot de passe est géré par le hook du modèle)
             const user = await User.create({
                 username,
                 email,
@@ -28,7 +28,6 @@ class AuthController {
                 role: role || 'AGENT_QUAI'
             });
 
-            // Ne pas renvoyer le mot de passe
             const userWithoutPassword = user.toJSON();
             delete userWithoutPassword.password;
 
@@ -56,7 +55,12 @@ class AuthController {
                         sequelize.where(sequelize.fn('LOWER', sequelize.col('email')), email?.toLowerCase() || ''),
                         sequelize.where(sequelize.fn('LOWER', sequelize.col('username')), email?.toLowerCase() || '')
                     ]
-                }
+                },
+                include: [{
+                    model: Role,
+                    as: 'assignedRole',
+                    include: [{ model: Permission, as: 'permissions' }]
+                }]
             });
 
             if (!user) {
@@ -66,7 +70,11 @@ class AuthController {
             if (user.lockUntil && user.lockUntil > new Date()) {
                 const waitTime = Math.ceil((user.lockUntil - new Date()) / 60000);
                 await LoginHistory.create({ userId: user.id, ipAddress, userAgent, status: 'FAILED' });
-                return res.status(403).json({ error: `Compte temporairement bloqué. Réessayez dans ${waitTime} minutes.` });
+                return res.status(403).json({
+                    error: `Compte temporairement bloqué. Réessayez dans ${waitTime} minutes.`,
+                    code: 'ACCOUNT_LOCKED',
+                    lockUntil: user.lockUntil
+                });
             }
 
             const isValid = await user.validatePassword(password);
@@ -78,11 +86,22 @@ class AuthController {
                 await user.update({ failedLoginAttempts: attempts, lockUntil });
                 await LoginHistory.create({ userId: user.id, ipAddress, userAgent, status: 'FAILED' });
 
-                if (attempts >= 5) return res.status(403).json({ error: 'Compte bloqué suite à trop de tentatives. Réessayez dans 15min.' });
-                return res.status(401).json({ error: `Mot de passe incorrect. (${attempts}/5)`, field: 'password' });
+                if (attempts >= 5) return res.status(403).json({
+                    error: 'Compte bloqué suite à trop de tentatives. Réessayez dans 15min.',
+                    code: 'ACCOUNT_LOCKED',
+                    lockUntil
+                });
+                return res.status(401).json({
+                    error: `Mot de passe incorrect. (${attempts}/5)`,
+                    field: 'password',
+                    attemptsRemaining: 5 - attempts
+                });
             }
 
-            if (!user.isActive) return res.status(403).json({ error: 'Votre compte est désactivé.' });
+            if (!user.isActive) return res.status(403).json({
+                error: 'Votre compte est suspendu ou désactivé.',
+                code: 'ACCOUNT_DISABLED'
+            });
 
             // Reset failures
             await user.update({ failedLoginAttempts: 0, lockUntil: null, lastLoginAt: new Date() });
@@ -121,13 +140,16 @@ class AuthController {
                 maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
             });
 
+            const permissionCodes = user.assignedRole?.permissions?.map(p => p.code) || [];
+
             res.status(200).json({
                 message: 'Connexion réussie.',
                 user: {
                     id: user.id,
                     username: user.username,
                     email: user.email,
-                    role: user.role
+                    role: user.role,
+                    permissions: permissionCodes
                 }
             });
 
@@ -137,26 +159,32 @@ class AuthController {
         }
     }
 
+    // ... (refreshToken, logout unchanged)
     async refreshToken(req, res) {
+        // ... (keep original logic)
         try {
             const token = req.cookies.refreshToken;
             if (!token) return res.status(401).json({ error: 'Token manquant' });
 
             const rToken = await RefreshToken.findOne({ where: { token } });
 
-            if (!rToken || rToken.revoked || new Date() > rToken.expiresAt) {
-                // Security: if token reused/invalid, potentially revoke all user tokens (Rotation reuse detection)
+            if (!rToken || new Date() > rToken.expiresAt) {
                 return res.status(403).json({ error: 'Refresh token invalide ou expiré' });
+            }
+
+            if (rToken.revoked) {
+                await RefreshToken.update({ revoked: true }, { where: { userId: rToken.userId } });
+                res.clearCookie('accessToken');
+                res.clearCookie('refreshToken');
+                return res.status(403).json({ error: 'Alerte de sécurité : Session compromise. Veuillez vous reconnecter.' });
             }
 
             const user = await User.findByPk(rToken.userId);
             if (!user) return res.status(404).json({ error: 'Utilisateur introuvable' });
 
-            // Rotate Token
             const newRefreshToken = crypto.randomBytes(40).toString('hex');
             const newExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 
-            // Revoke old, create new
             rToken.revoked = true;
             rToken.replacedByToken = newRefreshToken;
             await rToken.save();
@@ -167,14 +195,12 @@ class AuthController {
                 expiresAt: newExpiresAt
             });
 
-            // Issue new Access Token
             const newAccessToken = jwt.sign(
                 { id: user.id, role: user.role },
                 process.env.JWT_SECRET || 'votre_secret_jwt_tres_long_et_aleatoire_12345',
                 { expiresIn: '15m' }
             );
 
-            // Set Cookies
             res.cookie('accessToken', newAccessToken, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === 'production',
@@ -189,8 +215,7 @@ class AuthController {
                 maxAge: 7 * 24 * 60 * 60 * 1000
             });
 
-            res.json({ message: 'Token rafraîchi' });
-
+            res.json({ message: 'Token rafraîchi' }); // Usually client refreshes page/state to get new user info or just updates token
         } catch (error) {
             console.error('RefreshToken Error:', error);
             res.status(500).json({ error: 'Erreur serveur' });
@@ -215,14 +240,24 @@ class AuthController {
         try {
             // req.user est peuplé par le middleware, mais on recharge pour être sûr d'avoir les dernières infos
             const user = await User.findByPk(req.user.id, {
-                attributes: { exclude: ['password'] }
+                attributes: { exclude: ['password'] },
+                include: [{
+                    model: Role,
+                    as: 'assignedRole',
+                    include: [{ model: Permission, as: 'permissions' }]
+                }]
             });
 
             if (!user) {
                 return res.status(404).json({ error: 'Utilisateur non trouvé.' });
             }
 
-            res.status(200).json(user);
+            const permissionCodes = user.assignedRole?.permissions?.map(p => p.code) || [];
+
+            const userResponse = user.toJSON();
+            userResponse.permissions = permissionCodes;
+
+            res.status(200).json(userResponse);
         } catch (error) {
             res.status(500).json({ error: error.message });
         }

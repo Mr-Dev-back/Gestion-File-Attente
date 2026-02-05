@@ -16,6 +16,7 @@
     "lint:fix": "eslint src/**/*.js --fix"
   },
   "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
     "bcrypt": "^5.1.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.5",

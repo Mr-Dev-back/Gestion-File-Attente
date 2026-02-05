@@ -1,0 +1,80 @@
+[
+  {
+    "orderNumber": "CMD2024-001",
+    "client": {
+      "name": "ENTREPRISE BTP DÉCO"
+    },
+    "commercial": {
+      "name": "Jean Dupont"
+    },
+    "categories": [
+      { "code": "BATIMENT", "label": "Matériaux bâtiment" },
+      { "code": "INFRA", "label": "Infrastructure" },
+      { "code": "ELECT", "label": "Électricité" }
+    ],
+    "paymentStatus": "UNPAID",
+    "products": [
+      {
+        "sku": "CIM-50",
+        "label": "Ciment 50kg",
+        "quantity": 200,
+        "theoreticalWeightKg": 10000
+      },
+      {
+        "sku": "FER-12",
+        "label": "Fer à béton 12",
+        "quantity": 50,
+        "theoreticalWeightKg": 3000
+      }
+    ]
+  },
+  {
+    "orderNumber": "CMD2024-002",
+    "client": {
+      "name": "LB BUILDING"
+    },
+    "commercial": {
+      "name": "Albert Mathurin"
+    },
+    "categories": [
+      { "code": "BATIMENT", "label": "Matériaux bâtiment" }
+    ],
+    "paymentStatus": "PAID",
+    "products": [
+      {
+        "sku": "CIM-50",
+        "label": "Ciment 50kg",
+        "quantity": 200,
+        "theoreticalWeightKg": 10000
+      },
+      {
+        "sku": "AGLO-50",
+        "label": "AGGLO 50x50x200",
+        "quantity": 50,
+        "theoreticalWeightKg": 3000
+      }
+    ]
+  },
+  {
+    "orderNumber": "CMD2024-003",
+    "client":{
+        "name": "PORTEO BTP"
+    },
+    "commercial": {
+        "name": "Marc Elioth"
+    },
+    "categories":[
+        {"code":"ELECT", "label": "Électricité"},
+        {"code": "INFRA", "label":"Infrastructure"}
+    ],
+    "paymentStatus": "UNPAID",
+    "products":[
+        {
+            "sku": "POTEAU-200",
+            "label": "Poteau électrique 200x200x900",
+            "quantity": 80,
+            "theoreticalWeightKg": 5000
+        }
+    ]
+  }
+]

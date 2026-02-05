@@ -14,10 +14,20 @@ import Queue from './Queue.js';
 import Kiosk from './Kiosk.js';
 import KioskActivity from './KioskActivity.js';
 import CategoryQueue from './CategoryQueue.js';
+import Role from './Role.js';
+import Permission from './Permission.js';
+import RolePermission from './RolePermission.js';
 
 // --- Relations Company <-> Site ---
 Company.hasMany(Site, { foreignKey: 'companyId', as: 'sites' });
 Site.belongsTo(Company, { foreignKey: 'companyId', as: 'company' });
+
+// --- RBAC Relations (US-005 Refinement) ---
+Role.hasMany(User, { foreignKey: 'roleId', as: 'users' });
+User.belongsTo(Role, { foreignKey: 'roleId', as: 'assignedRole' });
+
+Role.belongsToMany(Permission, { through: RolePermission, as: 'permissions', foreignKey: 'roleId' });
+Permission.belongsToMany(Role, { through: RolePermission, as: 'roles', foreignKey: 'permissionId' });
 
 // --- Relations Site <-> Workflow (US-008: Un site possède un seul workflow) ---
 Workflow.hasMany(Site, { foreignKey: 'workflowId', as: 'sites' });
@@ -34,6 +44,10 @@ User.belongsTo(Site, { foreignKey: 'siteId', as: 'site' });
 // --- Relations Site <-> Ticket ---
 Site.hasMany(Ticket, { foreignKey: 'siteId', as: 'tickets' });
 Ticket.belongsTo(Site, { foreignKey: 'siteId', as: 'site' });
+
+// --- Relations Company <-> Ticket ---
+Company.hasMany(Ticket, { foreignKey: 'companyId', as: 'tickets' });
+Ticket.belongsTo(Company, { foreignKey: 'companyId', as: 'company' });
 
 // --- Relations Ticket <-> Queue ---
 Queue.hasMany(Ticket, { foreignKey: 'queueId', as: 'tickets' });
@@ -90,6 +104,10 @@ Ticket.belongsTo(User, { foreignKey: 'calledById', as: 'calledBy' });
 User.hasMany(LoginHistory, { foreignKey: 'userId', as: 'loginHistory' });
 LoginHistory.belongsTo(User, { foreignKey: 'userId', as: 'user' });
 
+// --- User <-> RefreshToken ---
+User.hasMany(RefreshToken, { foreignKey: 'userId', as: 'refreshTokens' });
+RefreshToken.belongsTo(User, { foreignKey: 'userId', as: 'user' });
+
 // --- AuditLog Relations ---
 User.hasMany(AuditLog, { foreignKey: 'userId', as: 'auditLogs' });
 AuditLog.belongsTo(User, { foreignKey: 'userId', as: 'user' });
@@ -110,5 +128,8 @@ export {
   Queue,
   Kiosk,
   KioskActivity,
-  CategoryQueue
+  CategoryQueue,
+  Role,
+  Permission,
+  RolePermission
 };
